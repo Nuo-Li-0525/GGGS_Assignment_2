@@ -1,0 +1,113 @@
+/* **********************************************************************
+** Program Name: Process Transactions (CPRG 307 - Assignment 3 Part 1) **  
+** Author:       Kurt Hablado, Nuo Li, and Ehrl Balquin                **  
+** Created:      November 25, 2024                                     **  
+** Description:  Processes transactions from NEW_TRANSACTIONS table.   **
+**               Updates account balances and transaction history.     **
+**               Removes processed records from NEW_TRANSACTIONS.      **  
+********************************************************************** */
+
+DECLARE
+    -- Constants for transaction types
+    k_transaction_type_debit CONSTANT CHAR(1) := 'D';
+    k_transaction_type_credit CONSTANT CHAR(1) := 'C';
+
+    -- Cursor to retrieve distinct transactions
+    CURSOR c_transaction IS
+        SELECT DISTINCT transaction_no, transaction_date, description
+        FROM new_transactions;
+
+    -- Cursor to retrieve specific transaction details
+    CURSOR c_transaction_detail(p_transaction_no NUMBER) IS 
+        SELECT account_no, transaction_type, transaction_amount
+        FROM new_transactions
+        WHERE transaction_no = p_transaction_no;
+
+    -- Variables for transaction processing
+    v_transaction_no    NUMBER;
+    v_transaction_date  DATE;
+    v_description       VARCHAR2(100);
+    v_account_no        NUMBER;
+    v_transaction_type  CHAR(1);
+    v_transaction_amount NUMBER;
+    v_current_balance   NUMBER;
+    v_default_trans_type CHAR(1);
+    v_error_message VARCHAR2(200);
+
+BEGIN
+    -- Open the transaction cursor
+    OPEN c_transaction;
+
+    -- Process each transaction from NEW_TRANSACTIONS
+    LOOP
+        FETCH c_transaction INTO v_transaction_no, v_transaction_date, v_description;
+        EXIT WHEN c_transaction%NOTFOUND;
+
+        -- Insert into TRANSACTION_HISTORY
+        INSERT INTO transaction_history (transaction_no, transaction_date, description)
+        VALUES (v_transaction_no, v_transaction_date, v_description);
+
+        -- Open the detail cursor for the current transaction
+        OPEN c_transaction_detail(v_transaction_no);
+
+        LOOP
+            FETCH c_transaction_detail INTO v_account_no, v_transaction_type, v_transaction_amount;
+            EXIT WHEN c_transaction_detail%NOTFOUND;
+
+            -- Retrieve the default transaction type and current balance for the account
+            SELECT default_trans_type, account_balance
+            INTO v_default_trans_type, v_current_balance
+            FROM account a
+            JOIN account_type at ON a.account_type_code = at.account_type_code
+            WHERE a.account_no = v_account_no;
+
+            -- Check for valid default transaction type
+            IF v_default_trans_type NOT IN (k_transaction_type_debit, k_transaction_type_credit) THEN
+                RAISE_APPLICATION_ERROR(-20002, 'Invalid default transaction type for account ' || v_account_no);
+            END IF;
+
+            -- Update balance based on the default transaction type
+            IF v_default_trans_type = k_transaction_type_debit THEN
+                IF v_transaction_type = k_transaction_type_debit THEN
+                    v_current_balance := v_current_balance + v_transaction_amount;
+                ELSE
+                    v_current_balance := v_current_balance - v_transaction_amount;
+                END IF;
+            ELSE -- v_default_trans_type = k_transaction_type_credit
+                IF v_transaction_type = k_transaction_type_credit THEN
+                    v_current_balance := v_current_balance + v_transaction_amount;
+                ELSE
+                    v_current_balance := v_current_balance - v_transaction_amount;
+                END IF;
+            END IF;
+
+            -- Update the account balance and log transaction details
+            UPDATE account 
+            SET account_balance = v_current_balance 
+            WHERE account_no = v_account_no;
+
+            INSERT INTO transaction_detail (account_no, transaction_no, transaction_type, transaction_amount)
+            VALUES (v_account_no, v_transaction_no, v_transaction_type, v_transaction_amount);
+        END LOOP;
+
+        CLOSE c_transaction_detail;
+
+        -- Remove processed transaction from NEW_TRANSACTIONS
+        DELETE FROM new_transactions WHERE transaction_no = v_transaction_no;
+    END LOOP;
+
+    CLOSE c_transaction;
+
+    -- Commit all changes
+    COMMIT;
+
+EXCEPTION
+    -- Log errors during processing
+    WHEN OTHERS THEN
+        v_error_message := 'Process Error: ' || SQLERRM;
+        INSERT INTO wkis_error_log (transaction_no, transaction_date, description, error_msg)
+        VALUES (NVL(v_transaction_no, -1), NVL(v_transaction_date, SYSDATE), NVL(v_description, 'No description'), v_error_message);
+
+        -- Rollback any partial changes
+        ROLLBACK;
+END;
